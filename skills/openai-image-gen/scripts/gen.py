@@ -221,6 +221,43 @@ def atlas_size(size: str) -> str:
     return size.replace("x", "*")
 
 
+# aspect_ratio values accepted by Atlas's nano-banana image models.
+_ATLAS_ASPECT_RATIOS = {
+    "1:1": 1.0, "3:2": 3 / 2, "2:3": 2 / 3, "3:4": 3 / 4, "4:3": 4 / 3,
+    "4:5": 4 / 5, "5:4": 5 / 4, "9:16": 9 / 16, "16:9": 16 / 9, "21:9": 21 / 9,
+}
+
+
+def atlas_size_params(model: str, size: str) -> dict:
+    """Map --size onto the size parameters the chosen Atlas model understands.
+
+    Most models take ``size: "width*height"``. The nano-banana family has no
+    ``size`` field; it takes ``aspect_ratio`` plus ``resolution`` (1k/2k/4k),
+    so a ``size`` sent to it would be silently ignored.
+    """
+    if "nano-banana" not in model:
+        return {"size": atlas_size(size)}
+    try:
+        w, h = (int(v) for v in re.split(r"[x*]", size.lower()))
+    except ValueError:
+        raise ValueError(f"Cannot parse --size {size!r} as WIDTHxHEIGHT") from None
+    ratio = w / h
+    aspect = min(_ATLAS_ASPECT_RATIOS, key=lambda k: abs(_ATLAS_ASPECT_RATIOS[k] - ratio))
+    longest = max(w, h)
+    resolution = "1k" if longest <= 1024 else "2k" if longest <= 2048 else "4k"
+    return {"aspect_ratio": aspect, "resolution": resolution}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so the Authorization header is never forwarded elsewhere."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_atlas_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def request_images_atlas(api_key: str, prompt: str, model: str, size: str) -> dict:
     """Generate one image through Atlas Cloud's async API.
 
@@ -229,7 +266,7 @@ def request_images_atlas(api_key: str, prompt: str, model: str, size: str) -> di
     OpenAI Images response so the caller stays provider-agnostic.
     """
     body = json.dumps(
-        {"model": model, "prompt": prompt, "size": atlas_size(size)}
+        {"model": model, "prompt": prompt, **atlas_size_params(model, size)}
     ).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -240,7 +277,7 @@ def request_images_atlas(api_key: str, prompt: str, model: str, size: str) -> di
         f"{ATLAS_BASE_URL}/generateImage", method="POST", headers=headers, data=body
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with _atlas_opener.open(req, timeout=60) as resp:
             submitted = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         payload = e.read().decode("utf-8", errors="replace")
@@ -252,7 +289,14 @@ def request_images_atlas(api_key: str, prompt: str, model: str, size: str) -> di
 
     deadline = time.monotonic() + ATLAS_POLL_TIMEOUT_S
     while True:
-        time.sleep(ATLAS_POLL_INTERVAL_S)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"Atlas Cloud prediction {prediction_id} did not finish within "
+                f"{ATLAS_POLL_TIMEOUT_S}s"
+            )
+        time.sleep(min(ATLAS_POLL_INTERVAL_S, remaining))
+        remaining = max(deadline - time.monotonic(), 1)
         poll = urllib.request.Request(
             f"{ATLAS_BASE_URL}/prediction/{prediction_id}",
             method="GET",
@@ -262,7 +306,7 @@ def request_images_atlas(api_key: str, prompt: str, model: str, size: str) -> di
             },
         )
         try:
-            with urllib.request.urlopen(poll, timeout=60) as resp:
+            with _atlas_opener.open(poll, timeout=min(60, remaining)) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             payload = e.read().decode("utf-8", errors="replace")

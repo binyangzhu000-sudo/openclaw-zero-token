@@ -8,6 +8,7 @@ import gen
 import pytest
 from gen import (
     atlas_size,
+    atlas_size_params,
     normalize_background,
     normalize_output_format,
     normalize_style,
@@ -173,14 +174,21 @@ def _fake_urlopen(responses):
     def _urlopen(req, timeout=None):
         return _Resp(next(calls))
 
-    return _urlopen
+    class _Opener:
+        timeouts = []
+
+        def open(self, req, timeout=None):
+            self.timeouts.append(timeout)
+            return _urlopen(req, timeout)
+
+    return _Opener()
 
 
 def test_request_images_atlas_polls_until_completed(monkeypatch):
     monkeypatch.setattr(gen.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
-        gen.urllib.request,
-        "urlopen",
+        gen,
+        "_atlas_opener",
         _fake_urlopen(
             [
                 {"data": {"id": "pred-1", "status": "processing"}},
@@ -196,8 +204,8 @@ def test_request_images_atlas_polls_until_completed(monkeypatch):
 def test_request_images_atlas_raises_on_failed_prediction(monkeypatch):
     monkeypatch.setattr(gen.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
-        gen.urllib.request,
-        "urlopen",
+        gen,
+        "_atlas_opener",
         _fake_urlopen(
             [
                 {"data": {"id": "pred-1", "status": "processing"}},
@@ -210,8 +218,34 @@ def test_request_images_atlas_raises_on_failed_prediction(monkeypatch):
 
 
 def test_request_images_atlas_raises_without_prediction_id(monkeypatch):
-    monkeypatch.setattr(
-        gen.urllib.request, "urlopen", _fake_urlopen([{"code": 200, "data": {}}])
-    )
+    monkeypatch.setattr(gen, "_atlas_opener", _fake_urlopen([{"code": 200, "data": {}}]))
     with pytest.raises(RuntimeError, match="Unexpected Atlas submit response"):
+        request_images_atlas("key", "a prompt", "alibaba/wan-2.7/text-to-image", "1024x1024")
+
+
+def test_atlas_size_params_default_models_use_width_star_height():
+    assert atlas_size_params("alibaba/wan-2.7/text-to-image", "1536x1024") == {"size": "1536*1024"}
+
+
+def test_atlas_size_params_nano_banana_uses_aspect_ratio_and_resolution():
+    m = "google/nano-banana-pro/text-to-image"
+    assert atlas_size_params(m, "1024x1024") == {"aspect_ratio": "1:1", "resolution": "1k"}
+    assert atlas_size_params(m, "1536x1024") == {"aspect_ratio": "3:2", "resolution": "2k"}
+    assert atlas_size_params(m, "1024x1536") == {"aspect_ratio": "2:3", "resolution": "2k"}
+    assert atlas_size_params(m, "3840x2160") == {"aspect_ratio": "16:9", "resolution": "4k"}
+
+
+def test_atlas_requests_do_not_follow_redirects():
+    import urllib.request
+
+    handler = gen._NoRedirect()
+    req = urllib.request.Request("https://api.atlascloud.ai/x", headers={"Authorization": "Bearer k"})
+    assert handler.redirect_request(req, None, 302, "Found", {}, "https://evil.example/") is None
+
+
+def test_request_images_atlas_stops_polling_at_deadline(monkeypatch):
+    monkeypatch.setattr(gen, "ATLAS_POLL_TIMEOUT_S", 0)
+    opener = _fake_urlopen([{"data": {"id": "pred-1", "status": "processing"}}])
+    monkeypatch.setattr(gen, "_atlas_opener", opener)
+    with pytest.raises(RuntimeError, match="did not finish"):
         request_images_atlas("key", "a prompt", "alibaba/wan-2.7/text-to-image", "1024x1024")

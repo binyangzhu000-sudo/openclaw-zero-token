@@ -68,7 +68,7 @@ Notes:
 
 - Default model is `alibaba/wan-2.7/text-to-image`. Other options include `black-forest-labs/flux-schnell`, `bytedance/seedream-v5.0-lite`, `google/imagen4`, `google/nano-banana-pro/text-to-image`, `openai/gpt-image-2/text-to-image`, `qwen/qwen-image-2.0/text-to-image` and `z-image/turbo` — see [atlascloud.ai/models](https://www.atlascloud.ai/models).
 - Atlas is **not** OpenAI Images API compatible: the script submits a job and polls the prediction (up to 300s), so keep the exec timeout high as noted above.
-- `--size` keeps the familiar `1024x1024` form; the script converts it to the `width*height` form Atlas expects.
+- `--size` keeps the familiar `1024x1024` form; the script converts it to the `width*height` form Atlas expects. The `nano-banana` models take no `size`, so for them it is mapped to the nearest supported `aspect_ratio` plus a `resolution` (`1k` up to 1024px on the long side, `2k` up to 2048px, else `4k`).
 - `--quality`, `--background`, `--output-format` and `--style` are OpenAI-only; passing them with `--provider atlas` prints a warning and ignores them.
 
 ## Model-Specific Parameters
